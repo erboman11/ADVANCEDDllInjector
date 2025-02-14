@@ -1,0 +1,80 @@
+#include <windows.h>
+#include <tlhelp32.h>
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <stdexcept>
+
+void log_message(const std::string& message) {
+    std::ofstream log_file("injector_log.txt", std::ios_base::app);
+    log_file << "[" << __TIME__ << "] " << message << std::endl;
+}
+
+DWORD get_process_id_by_name(const wchar_t* process_name) {
+    DWORD process_id = 0;
+    HANDLE snapshot_handle = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot_handle == INVALID_HANDLE_VALUE) {
+        log_message("failed_to_create_snapshot_of_processes");
+        return 0;
+    }
+    PROCESSENTRY32 process_entry;
+    process_entry.dwSize = sizeof(process_entry);
+    if (Process32First(snapshot_handle, &process_entry)) {
+        do {
+            if (_wcsicmp(process_entry.szExeFile, process_name) == 0) {
+                process_id = process_entry.th32ProcessID;
+                break;
+            }
+        } while (Process32Next(snapshot_handle, &process_entry));
+    } else {
+        log_message("failed_to_iterate_through_processes");
+    }
+    CloseHandle(snapshot_handle);
+    return process_id;
+}
+
+void inject_dll_into_process(DWORD process_id, const char* dll_path) {
+    try {
+        HANDLE process_handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, process_id);
+        if (process_handle == NULL) {
+            throw std::runtime_error("failed_to_open_target_process");
+        }
+        size_t dll_path_len = strlen(dll_path) + 1;
+        LPVOID allocated_memory = VirtualAllocEx(process_handle, NULL, dll_path_len, MEM_COMMIT, PAGE_READWRITE);
+        if (allocated_memory == NULL) {
+            CloseHandle(process_handle);
+            throw std::runtime_error("failed_to_allocate_memory_in_target_process");
+        }
+        if (!WriteProcessMemory(process_handle, allocated_memory, dll_path, dll_path_len, NULL)) {
+            VirtualFreeEx(process_handle, allocated_memory, 0, MEM_RELEASE);
+            CloseHandle(process_handle);
+            throw std::runtime_error("failed_to_write_to_memory_in_target_process");
+        }
+        HANDLE thread_handle = CreateRemoteThread(process_handle, NULL, 0, (LPTHREAD_START_ROUTINE)LoadLibraryA, allocated_memory, 0, NULL);
+        if (thread_handle == NULL) {
+            VirtualFreeEx(process_handle, allocated_memory, 0, MEM_RELEASE);
+            CloseHandle(process_handle);
+            throw std::runtime_error("failed_to_create_remote_thread_in_target_process");
+        }
+        WaitForSingleObject(thread_handle, INFINITE);
+        VirtualFreeEx(process_handle, allocated_memory, 0, MEM_RELEASE);
+        CloseHandle(thread_handle);
+        CloseHandle(process_handle);
+        log_message("dll_injected_successfully");
+    } catch (const std::exception& ex) {
+        log_message(std::string("error_in_inject_dll_into_process: ") + ex.what());
+    }
+}
+
+int main() {
+    const wchar_t* target_process_name = L"RobloxPlayerBeta.exe";
+    const char* dll_path = "C:\\path\\to\\your\\dll\\CustomDLL.dll";
+    DWORD process_id = get_process_id_by_name(target_process_name);
+    if (process_id != 0) {
+        inject_dll_into_process(process_id, dll_path);
+        std::cout << "dll_injected_successfully" << std::endl;
+    } else {
+        std::cout << "process_not_found" << std::endl;
+    }
+    return 0;
+}
